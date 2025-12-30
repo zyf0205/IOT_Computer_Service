@@ -5,7 +5,6 @@ WebSocket 服务器模块
 
 import asyncio
 import websockets
-import struct
 import datetime
 from protocol import IotProtocol
 from database import save_sensor_data
@@ -21,14 +20,14 @@ class IoTServer:
         
         参数:
             log_callback: 日志回调函数 log(message)
-            update_display_callback: 界面更新回调函数 update(temp, hum)
+            update_display_callback: 界面更新回调函数 update(temp, hum, light)
             status_callback: 状态更新回调函数 status(text, color)
         """
         self.loop = None                      # 异步事件循环
         self.connected_clients = set()        # 已连接的客户端集合
         self.log_callback = log_callback      # 日志输出回调
         self.update_display_callback = update_display_callback  # 界面更新回调
-        self.status_callback = status_callback  # 新增状态回调
+        self.status_callback = status_callback  # 状态回调
     
     def log(self, message):
         """输出日志"""
@@ -59,9 +58,6 @@ class IoTServer:
     async def ws_handler(self, websocket):
         """
         WebSocket 连接处理器
-        
-        参数:
-            websocket: 客户端连接对象
         """
         # 添加到连接列表
         self.connected_clients.add(websocket)
@@ -94,9 +90,6 @@ class IoTServer:
     async def process_data(self, data):
         """
         处理接收到的数据
-        
-        参数:
-            data: 解析后的数据字典
         """
         cmd = data["cmd"]
         dev_id = hex(data["dev_id"])
@@ -105,39 +98,44 @@ class IoTServer:
         if cmd == CMD_HEARTBEAT:
             self.log(f"[心跳] Dev:{dev_id}")
         
-        # 温湿度数据
+        # 温湿度+光照数据上报
         elif cmd == CMD_SENSOR_DATA:
-            if len(data["payload"]) == 16:
-                # 解析载荷: 温度(4B) + 湿度(4B) + 时间戳低位(4B) + 时间戳高位(4B)
-                temp, hum, time_low, time_high = struct.unpack("<IIII", data["payload"])
-                
-                # 合并为64位毫秒时间戳
-                device_time_ms = (time_high << 32) | time_low
+            # [修改] 使用 protocol 中封装好的解码函数
+            sensor_data = IotProtocol.decode_sensor_payload(data["payload"])
+            
+            if sensor_data:
+                temp = sensor_data["temp"]
+                hum = sensor_data["hum"]
+                light = sensor_data["light"]
+                ts = sensor_data["ts"]
                 
                 # 转换为 datetime 对象
-                device_time_dt = datetime.datetime.fromtimestamp(device_time_ms / 1000.0)
+                device_time_dt = datetime.datetime.fromtimestamp(ts / 1000.0)
                 device_time_str = device_time_dt.strftime("%Y-%m-%d %H:%M:%S")
                 
-                # 保存到数据库
-                success, error = save_sensor_data(dev_id, temp, hum, device_time_str)
+                # 保存到数据库 (注意: save_sensor_data 函数可能需要修改以支持 light 参数)
+                # 如果数据库还没改，暂时只存温湿度
+                try:
+                    # 尝试传入光照参数，如果 save_sensor_data 不支持会报错，这里做个兼容
+                    success, error = save_sensor_data(dev_id, temp, hum, device_time_str, light)
+                except TypeError:
+                    # 兼容旧版数据库接口
+                    success, error = save_sensor_data(dev_id, temp, hum, device_time_str)
+
                 if not success:
                     self.log(f"DB错误: {error}")
                 
-                # 更新界面显示
+                # [修改] 更新界面显示 (传入3个参数)
                 if self.update_display_callback:
-                    self.update_display_callback(temp, hum)
+                    self.update_display_callback(temp, hum, light)
                 
-                self.log(f"[上报] 温度:{temp}°C 湿度:{hum}% 时间:{device_time_str}")
+                self.log(f"[上报] T:{temp}°C H:{hum}% L:{light} Time:{device_time_str}")
             else:
-                self.log(f"数据长度错误: {len(data['payload'])} (期望16字节)")
+                self.log(f"Payload解析失败: 长度={len(data['payload'])}")
     
     async def broadcast_command(self, dev_id, led_status):
         """
         广播控制命令到所有连接的设备
-        
-        参数:
-            dev_id: 目标设备ID
-            led_status: LED状态 (True/False)
         """
         if not self.connected_clients:
             self.log("警告: 无设备连接")

@@ -14,12 +14,6 @@ class IotProtocol:
     def calc_crc(data: bytes) -> int:
         """
         计算 CRC-16 校验值 (Modbus 标准)
-        
-        参数:
-            data: 需要计算校验的字节数据
-        
-        返回:
-            16位 CRC 校验值
         """
         crc = 0xFFFF
         for pos in data:
@@ -35,17 +29,7 @@ class IotProtocol:
     @staticmethod
     def parse_packet(data: bytes):
         """
-        解析接收到的数据包
-        
-        数据包格式:
-            [帧头:2B] [版本:1B] [命令:1B] [序号:1B] [设备ID:4B] [长度:2B] [数据:NB] [CRC:2B]
-        
-        参数:
-            data: 接收到的原始字节数据
-        
-        返回:
-            成功: (解析结果字典, "OK")
-            失败: (None, 错误信息)
+        解析接收到的数据包基础结构
         """
         # 最小长度检查 (帧头2 + 版本1 + 命令1 + 序号1 + 设备ID4 + 长度2 + CRC2 = 13)
         if len(data) < 13:
@@ -53,8 +37,6 @@ class IotProtocol:
 
         try:
             # 解析固定头部 (11字节)
-            # < 表示小端序
-            # H=2字节 B=1字节 I=4字节
             head, ver, cmd, seq, dev_id, pay_len = struct.unpack("<HBBBIH", data[:11])
         except struct.error:
             return None, "Struct unpack error"
@@ -83,21 +65,41 @@ class IotProtocol:
             "cmd": cmd,               # 命令类型
             "seq": seq,               # 序列号
             "dev_id": dev_id,         # 设备ID
-            "payload": payload,       # 载荷数据
-            "raw_hex": data.hex().upper(),  # 原始16进制字符串
+            "payload": payload,       # 载荷数据 (原始字节)
+            "raw_hex": data.hex().upper(),
         }, "OK"
+
+    @staticmethod
+    def decode_sensor_payload(payload: bytes):
+        """
+        [新增] 解析传感器上报的具体业务数据
+        
+        格式: [温度:4B float] [湿度:4B float] [光照:4B uint] [时间戳:8B uint64]
+        总长度: 20 字节
+        """
+        if len(payload) != 20:
+            return None
+            
+        try:
+            # < = 小端序
+            # f = float (4 bytes)
+            # I = unsigned int (4 bytes)
+            # Q = unsigned long long (8 bytes)
+            temp, hum, light, ts = struct.unpack("<ffIQ", payload)
+            
+            return {
+                "temp": round(temp, 1), # 保留1位小数
+                "hum": round(hum, 1),   # 保留1位小数
+                "light": light,         # 原始光照值 (0-4095)
+                "ts": ts
+            }
+        except struct.error:
+            return None
 
     @staticmethod
     def build_control_packet(dev_id: int, led_status: bool) -> bytes:
         """
         构建 LED 控制命令数据包
-        
-        参数:
-            dev_id: 目标设备ID
-            led_status: True=开启, False=关闭
-        
-        返回:
-            完整的二进制数据包
         """
         cmd = 0x80  # LED 控制命令
         seq = 0x01  # 序列号
